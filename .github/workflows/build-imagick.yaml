@@ -256,6 +256,20 @@ jobs:
           New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
           Expand-Archive -Path "php-ts.zip" -DestinationPath "C:\php-bin" -Force
 
+          # Our release zips have a subdirectory (e.g. php-8.6.0-dev-ts-Win32-vs18-x64/).
+          # If php.exe is not directly in C:\php-bin, flatten the structure.
+          $php = "C:\php-bin\php.exe"
+          if (-not (Test-Path $php)) {
+              $found = Get-ChildItem -Path "C:\php-bin" -Recurse -Filter "php.exe" | Select-Object -First 1
+              if (-not $found) { throw "php.exe not found anywhere in the extracted PHP TS binary." }
+              $innerDir = $found.Directory.FullName
+              Write-Host "Flattening: php.exe is in $innerDir, moving contents to C:\php-bin"
+              Get-ChildItem -Path $innerDir | Move-Item -Destination "C:\php-bin" -Force
+              # Remove the now-empty subdirectory
+              if ((Get-ChildItem -Path $innerDir -ErrorAction SilentlyContinue).Count -eq 0) {
+                  Remove-Item $innerDir -Force
+              }
+          }
           $php = "C:\php-bin\php.exe"
           if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP TS binary." }
           & $php -v
@@ -270,7 +284,15 @@ jobs:
 
           Write-Host "PHP devel pack root: C:\php-devel"
           if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
-              throw "C:\php-devel\include\main\php.h missing - this devel pack is not laid out as expected."
+              Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
+              $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match '\main\' } | Select-Object -First 1
+              if (-not $h) { throw "php.h not found in the devel pack at all." }
+              Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
+              $innerInclude = $h.Directory.Parent.FullName
+              if (-not (Test-Path "C:\php-devel\include")) {
+                  Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
+              }
           }
           Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
 
@@ -706,7 +728,15 @@ jobs:
           Move-Item -Path $phpize.Directory.FullName -Destination "C:\php-devel" -Force
 
           if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
-              throw "C:\php-devel\include\main\php.h missing - this devel pack is not laid out as expected."
+              Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
+              $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match '\main\' } | Select-Object -First 1
+              if (-not $h) { throw "php.h not found in the devel pack at all." }
+              Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
+              $innerInclude = $h.Directory.Parent.FullName
+              if (-not (Test-Path "C:\php-devel\include")) {
+                  Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
+              }
           }
 
       - name: Prepare ImageMagick development files (fixed layout)
