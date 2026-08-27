@@ -256,7 +256,7 @@ jobs:
           New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
           Expand-Archive -Path "php-ts.zip" -DestinationPath "C:\php-bin" -Force
 
-          # Our release zips have a subdirectory (e.g. php-8.6.0-dev-ts-Win32-vs18-x64/).
+          # Our release zips wrap contents in a subdirectory.
           # If php.exe is not directly in C:\php-bin, flatten the structure.
           $php = "C:\php-bin\php.exe"
           if (-not (Test-Path $php)) {
@@ -265,7 +265,6 @@ jobs:
               $innerDir = $found.Directory.FullName
               Write-Host "Flattening: php.exe is in $innerDir, moving contents to C:\php-bin"
               Get-ChildItem -Path $innerDir | Move-Item -Destination "C:\php-bin" -Force
-              # Remove the now-empty subdirectory
               if ((Get-ChildItem -Path $innerDir -ErrorAction SilentlyContinue).Count -eq 0) {
                   Remove-Item $innerDir -Force
               }
@@ -277,16 +276,22 @@ jobs:
           New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
           Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel-extract" -Force
 
+          # Search for phpize.bat recursively, then move its CONTAINING directory
           $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
           if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP devel pack." }
 
-          Move-Item -Path $phpize.Directory.FullName -Destination "C:\php-devel" -Force
+          $develDir = $phpize.Directory.FullName
+          Write-Host "Found phpize.bat in: $develDir"
 
-          Write-Host "PHP devel pack root: C:\php-devel"
+          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
+          Move-Item -Path $develDir -Destination "C:\php-devel" -Force
+
+          # Verify critical files at expected paths
+          if (-not (Test-Path "C:\php-devel\phpize.bat")) { throw "phpize.bat not at C:\php-devel\phpize.bat" }
           if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
               Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
               $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.FullName -match '\main\' } | Select-Object -First 1
+                    Where-Object { $_.FullName -match '\\main\\' } | Select-Object -First 1
               if (-not $h) { throw "php.h not found in the devel pack at all." }
               Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
               $innerInclude = $h.Directory.Parent.FullName
@@ -294,8 +299,8 @@ jobs:
                   Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
               }
           }
+          Write-Host "PHP devel pack root: C:\php-devel"
           Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
-
       # --------------------------------------------------------
       # Prepare ImageMagick dev tree - THE ACTUAL FIX IS HERE
       # --------------------------------------------------------
@@ -649,41 +654,62 @@ jobs:
                   Write-Host "[$i/5] Downloading PHP SDK from GitHub..."
                   Invoke-WebRequest -Uri "https://github.com/php/php-sdk-binary-tools/archive/refs/heads/master.zip" -OutFile "sdk.zip" -UseBasicParsing
                   break
-              } catch {
-                  Write-Host "Attempt $i failed: $($_.Exception.Message)"
-                  if ($i -eq 5) { throw "Failed to download PHP SDK from GitHub after 5 attempts." }
-                  Start-Sleep -Seconds (5 * $i)
-              }
-          }
-
-          if (Test-Path "C:\php-sdk") { Remove-Item "C:\php-sdk" -Recurse -Force }
-          New-Item -ItemType Directory -Path "C:\php-sdk-extract" -Force | Out-Null
-          Expand-Archive -Path "sdk.zip" -DestinationPath "C:\php-sdk-extract" -Force
-
-          $root = Get-ChildItem -Path "C:\php-sdk-extract" -Directory | Select-Object -First 1
-          if (-not $root) { throw "PHP SDK archive root was not found." }
-          Move-Item -Path $root.FullName -Destination "C:\php-sdk" -Force
-
-          $starter = Get-ChildItem -Path "C:\php-sdk" -Recurse -Filter "phpsdk-vs18-x64.bat" | Select-Object -First 1
-          if (-not $starter) { throw "phpsdk-vs18-x64.bat not found in downloaded SDK." }
-
-          $bison = Get-ChildItem -Path "C:\php-sdk" -Recurse -Filter "bison.exe" | Select-Object -First 1
-          if (-not $bison) { throw "bison.exe not found in downloaded SDK." }
-
-      - name: Extract imagick source (vendored, pre-patched) - NTS copy
+      - name: Extract PHP NNTS binary + devel pack
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          if (Test-Path "C:\imagick-nts") { Remove-Item "C:\imagick-nts" -Recurse -Force }
-          New-Item -ItemType Directory -Path "C:\imagick-nts-raw" -Force | Out-Null
+          if (Test-Path "C:\php-bin")   { Remove-Item "C:\php-bin" -Recurse -Force }
+          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
 
-          Expand-Archive -Path "vendor\imagick-php86-patched.zip" -DestinationPath "C:\imagick-nts-raw" -Force
+          New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
+          Expand-Archive -Path "php-nts.zip" -DestinationPath "C:\php-bin" -Force
 
-          $configw32 = Get-ChildItem -Path "C:\imagick-nts-raw" -Recurse -Filter "config.w32" | Select-Object -First 1
-          if (-not $configw32) { throw "config.w32 not found inside vendored imagick source zip." }
+          # Our release zips wrap contents in a subdirectory.
+          # If php.exe is not directly in C:\php-bin, flatten the structure.
+          $php = "C:\php-bin\php.exe"
+          if (-not (Test-Path $php)) {
+              $found = Get-ChildItem -Path "C:\php-bin" -Recurse -Filter "php.exe" | Select-Object -First 1
+              if (-not $found) { throw "php.exe not found anywhere in the extracted PHP NNTS binary." }
+              $innerDir = $found.Directory.FullName
+              Write-Host "Flattening: php.exe is in $innerDir, moving contents to C:\php-bin"
+              Get-ChildItem -Path $innerDir | Move-Item -Destination "C:\php-bin" -Force
+              if ((Get-ChildItem -Path $innerDir -ErrorAction SilentlyContinue).Count -eq 0) {
+                  Remove-Item $innerDir -Force
+              }
+          }
+          $php = "C:\php-bin\php.exe"
+          if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP NNTS binary." }
+          & $php -v
 
-          Move-Item -Path $configw32.Directory.FullName -Destination "C:\imagick-nts" -Force
+          New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
+          Expand-Archive -Path "php-devel-nts.zip" -DestinationPath "C:\php-devel-extract" -Force
+
+          # Search for phpize.bat recursively, then move its CONTAINING directory
+          $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
+          if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP devel pack." }
+
+          $develDir = $phpize.Directory.FullName
+          Write-Host "Found phpize.bat in: $develDir"
+
+          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
+          Move-Item -Path $develDir -Destination "C:\php-devel" -Force
+
+          # Verify critical files at expected paths
+          if (-not (Test-Path "C:\php-devel\phpize.bat")) { throw "phpize.bat not at C:\php-devel\phpize.bat" }
+          if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
+              Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
+              $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.FullName -match '\\main\\' } | Select-Object -First 1
+              if (-not $h) { throw "php.h not found in the devel pack at all." }
+              Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
+              $innerInclude = $h.Directory.Parent.FullName
+              if (-not (Test-Path "C:\php-devel\include")) {
+                  Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
+              }
+          }
+          Write-Host "PHP devel pack root: C:\php-devel"
+          Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
 
       - name: Verify PHP 8.6 compatibility patch is present
         shell: pwsh
