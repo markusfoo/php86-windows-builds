@@ -256,12 +256,11 @@ jobs:
           if (Test-Path "C:\php-bin")   { Remove-Item "C:\php-bin" -Recurse -Force }
           if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
 
-          # --- PHP binary ---
+          # === PHP binary from our own release ===
           New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
           Expand-Archive -Path "php-ts.zip" -DestinationPath "C:\php-bin" -Force
 
-          # Our release zips wrap contents in a subdirectory.
-          # If php.exe is not directly in C:\php-bin, flatten the structure.
+          # Our release zips wrap contents in a subdirectory. Flatten if needed.
           $php = "C:\php-bin\php.exe"
           if (-not (Test-Path $php)) {
               $found = Get-ChildItem -Path "C:\php-bin" -Recurse -Filter "php.exe" | Select-Object -First 1
@@ -277,79 +276,74 @@ jobs:
           if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP TS binary." }
           & $php -v
 
-          # --- Devel pack ---
-          # Our devel pack zips also wrap contents in a subdirectory.
-          # Find phpize.bat recursively, then move its CONTAINING directory to C:\php-devel.
-          New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
-          Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel-extract" -Force
+          # === Devel pack: use OFFICIAL QA as base, overlay our custom lib/ ===
+          # Our custom devel pack is incomplete (missing script/, win32/ headers).
+          # The official QA pack has everything needed for compilation.
+          # Strategy: extract official pack -> C:\php-devel, then replace lib/ with
+          # our custom lib/ (so .lib files match our exact dev binary).
+          Write-Host ""
+          Write-Host "=== Extracting OFFICIAL QA devel pack as base ==="
+          New-Item -ItemType Directory -Path "C:\php-devel-official-extract" -Force | Out-Null
+          Expand-Archive -Path "php-devel-official.zip" -DestinationPath "C:\php-devel-official-extract" -Force
 
-          $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
-          if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP devel pack." }
+          # Official packs have a subdirectory wrapper. Find phpize.bat and flatten.
+          $phpize = Get-ChildItem -Path "C:\php-devel-official-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
+          if (-not $phpize) { throw "phpize.bat not found in the official QA devel pack." }
+          $officialDevelDir = $phpize.Directory.FullName
+          Write-Host "Official devel pack root: $officialDevelDir"
 
-          $develDir = $phpize.Directory.FullName
-          Write-Host "Found phpize.bat in: $develDir"
+          Move-Item -Path $officialDevelDir -Destination "C:\php-devel" -Force
 
-          Move-Item -Path $develDir -Destination "C:\php-devel" -Force
-
-          # Verify critical files at expected paths
+          # Verify the official pack has what we need
           if (-not (Test-Path "C:\php-devel\phpize.bat")) { throw "phpize.bat not at C:\php-devel\phpize.bat" }
+          if (-not (Test-Path "C:\php-devel\script\phpize.js")) { throw "script/phpize.js missing from official pack." }
           if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
-              Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
+              Write-Host "WARNING: include/main/php.h not directly present, checking subdirs..."
               $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
                     Where-Object { $_.FullName -match '\\main\\' } | Select-Object -First 1
-              if (-not $h) { throw "php.h not found in the devel pack at all." }
-              Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
+              if (-not $h) { throw "php.h not found in official devel pack." }
               $innerInclude = $h.Directory.Parent.FullName
               if (-not (Test-Path "C:\php-devel\include")) {
                   Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
               }
           }
-          Write-Host "PHP devel pack root: C:\php-devel"
-          Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
 
-          # --- Merge script/ from official QA devel pack ---
-          # Our custom devel pack doesn't have script/ (phpize.js etc.).
-          # Extract the official one and copy its script/ directory.
+          Write-Host "Official pack verified. Contents:"
+          Write-Host "  phpize.bat:  $(Test-Path 'C:\php-devel\phpize.bat')"
+          Write-Host "  script/:     $(Test-Path 'C:\php-devel\script')"
+          Write-Host "  include/:    $(Test-Path 'C:\php-devel\include')"
+          Write-Host "  lib/:        $(Test-Path 'C:\php-devel\lib')"
+          Write-Host "  build/:      $(Test-Path 'C:\php-devel\build')"
+
+          # === Overlay our custom lib/ (matching .lib files for our dev binary) ===
           Write-Host ""
-          Write-Host "=== Merging script/ from official QA devel pack ==="
-          if (Test-Path "C:\php-devel-official-extract") { Remove-Item "C:\php-devel-official-extract" -Recurse -Force }
-          New-Item -ItemType Directory -Path "C:\php-devel-official-extract" -Force | Out-Null
-          Expand-Archive -Path "php-devel-official.zip" -DestinationPath "C:\php-devel-official-extract" -Force
+          Write-Host "=== Overlaying custom lib/ from our release devel pack ==="
+          New-Item -ItemType Directory -Path "C:\php-devel-custom-extract" -Force | Out-Null
+          Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel-custom-extract" -Force
 
-          # Find script/ in the official pack (it has a subdirectory wrapper)
-          $officialScript = $null
-          $candidate = Get-ChildItem -Path "C:\php-devel-official-extract" -Recurse -Directory -Filter "script" | Select-Object -First 1
-          if ($candidate -and (Test-Path "$($candidate.FullName)\phpize.js")) {
-              $officialScript = $candidate.FullName
-          }
-          if (-not $officialScript) {
-              # Try direct: official pack might be flat
-              if (Test-Path "C:\php-devel-official-extract\script\phpize.js") {
-                  $officialScript = "C:\php-devel-official-extract\script"
-              }
-          }
-          if (-not $officialScript) {
-              # List what we got for debugging
-              Write-Host "Official devel pack structure:"
-              Get-ChildItem -Path "C:\php-devel-official-extract" -Recurse -Depth 2 | ForEach-Object { Write-Host $_.FullName }
-              throw "Could not find script/phpize.js in the official QA devel pack."
-          }
+          $customPhpize = Get-ChildItem -Path "C:\php-devel-custom-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
+          if (-not $customPhpize) { throw "phpize.bat not found in our custom devel pack." }
+          $customDevelDir = $customPhpize.Directory.FullName
+          $customLib = "$customDevelDir\lib"
+          if (-not (Test-Path $customLib)) { throw "lib/ not found in our custom devel pack." }
 
-          Write-Host "Found official script/ at: $officialScript"
-          Write-Host "Contents:"
-          Get-ChildItem -Path $officialScript -File | ForEach-Object { Write-Host "  $($_.Name)" }
+          Write-Host "Custom lib contents:"
+          Get-ChildItem -Path $customLib -File | ForEach-Object { Write-Host "  $($_.Name) ($([math]::Round($_.Length/1KB, 0)) KB)" }
 
-          # Replace or create C:\php-devel\script\ with the official one
-          if (Test-Path "C:\php-devel\script") { Remove-Item "C:\php-devel\script" -Recurse -Force }
-          Copy-Item -Path $officialScript -Destination "C:\php-devel\script" -Recurse -Force
+          # Replace the official lib/ with our custom one
+          if (Test-Path "C:\php-devel\lib") { Remove-Item "C:\php-devel\lib" -Recurse -Force }
+          Copy-Item -Path $customLib -Destination "C:\php-devel\lib" -Recurse -Force
 
           # Final verification
-          if (-not (Test-Path "C:\php-devel\script\phpize.js")) { throw "script/phpize.js still missing after merge!" }
-          Write-Host "script/ merged successfully. phpize.js is at C:\php-devel\script\phpize.js"
-
-      # --------------------------------------------------------
-      # Prepare ImageMagick dev tree - THE ACTUAL FIX IS HERE
-      # --------------------------------------------------------
+          $tsLib = "C:\php-devel\lib\php8ts.lib"
+          if (-not (Test-Path $tsLib)) { throw "php8ts.lib not found after lib overlay. Our custom devel pack may not have it." }
+          Write-Host ""
+          Write-Host "=== Final C:\php-devel structure ==="
+          Write-Host "  phpize.bat:  OK"
+          Write-Host "  script/:     OK ($(Get-ChildItem 'C:\php-devel\script' -File | Measure-Object).Count files)"
+          Write-Host "  include/:    OK"
+          Write-Host "  lib/:        OK ($(Get-ChildItem 'C:\php-devel\lib' -File | Measure-Object).Count files)"
+          Write-Host "  php8ts.lib: OK ($([math]::Round((Get-Item $tsLib).Length/1MB, 2)) MB)"
 
       - name: Prepare ImageMagick development files (fixed layout)
         shell: pwsh
