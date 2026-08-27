@@ -157,6 +157,11 @@ jobs:
           Get-FileWithRetry -Url $phpBin.browser_download_url -OutFile "php-ts.zip"
           Get-FileWithRetry -Url $develPack.browser_download_url -OutFile "php-devel.zip"
 
+          # Our custom devel pack is missing script/ (phpize.js etc.) because
+          # buildconf doesn't generate it for dev builds. Download the official
+          # QA devel pack to steal its script/ directory.
+          Get-FileWithRetry -Url "https://downloads.php.net/~windows/qa/php-devel-pack-8.6.0beta2-Win32-vs18-x64.zip" -OutFile "php-devel-official.zip"
+
           # ImageMagick deps from php.net PECL (unchanged)
           Get-FileWithRetry -Url "https://downloads.php.net/~windows/pecl/deps/ImageMagick-$env:IMAGEMAGICK_VERSION-vs17-x64.zip" -OutFile "imagemagick.zip"
 
@@ -301,6 +306,46 @@ jobs:
           }
           Write-Host "PHP devel pack root: C:\php-devel"
           Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
+
+          # --- Merge script/ from official QA devel pack ---
+          # Our custom devel pack doesn't have script/ (phpize.js etc.).
+          # Extract the official one and copy its script/ directory.
+          Write-Host ""
+          Write-Host "=== Merging script/ from official QA devel pack ==="
+          if (Test-Path "C:\php-devel-official-extract") { Remove-Item "C:\php-devel-official-extract" -Recurse -Force }
+          New-Item -ItemType Directory -Path "C:\php-devel-official-extract" -Force | Out-Null
+          Expand-Archive -Path "php-devel-official.zip" -DestinationPath "C:\php-devel-official-extract" -Force
+
+          # Find script/ in the official pack (it has a subdirectory wrapper)
+          $officialScript = $null
+          $candidate = Get-ChildItem -Path "C:\php-devel-official-extract" -Recurse -Directory -Filter "script" | Select-Object -First 1
+          if ($candidate -and (Test-Path "$($candidate.FullName)\phpize.js")) {
+              $officialScript = $candidate.FullName
+          }
+          if (-not $officialScript) {
+              # Try direct: official pack might be flat
+              if (Test-Path "C:\php-devel-official-extract\script\phpize.js") {
+                  $officialScript = "C:\php-devel-official-extract\script"
+              }
+          }
+          if (-not $officialScript) {
+              # List what we got for debugging
+              Write-Host "Official devel pack structure:"
+              Get-ChildItem -Path "C:\php-devel-official-extract" -Recurse -Depth 2 | ForEach-Object { Write-Host $_.FullName }
+              throw "Could not find script/phpize.js in the official QA devel pack."
+          }
+
+          Write-Host "Found official script/ at: $officialScript"
+          Write-Host "Contents:"
+          Get-ChildItem -Path $officialScript -File | ForEach-Object { Write-Host "  $($_.Name)" }
+
+          # Replace or create C:\php-devel\script\ with the official one
+          if (Test-Path "C:\php-devel\script") { Remove-Item "C:\php-devel\script" -Recurse -Force }
+          Copy-Item -Path $officialScript -Destination "C:\php-devel\script" -Recurse -Force
+
+          # Final verification
+          if (-not (Test-Path "C:\php-devel\script\phpize.js")) { throw "script/phpize.js still missing after merge!" }
+          Write-Host "script/ merged successfully. phpize.js is at C:\php-devel\script\phpize.js"
 
       # --------------------------------------------------------
       # Prepare ImageMagick dev tree - THE ACTUAL FIX IS HERE
