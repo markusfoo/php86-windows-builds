@@ -1,4 +1,4 @@
-name: Build Imagick PHP 8.6.0beta1 VS18 x64
+name: Build Imagick PHP 8.6 VS18 x64 (from own releases)
 
 # ============================================================================
 # ROOT CAUSE (verified directly against php-src win32/build/confutils.js and
@@ -63,7 +63,7 @@ permissions:
   contents: read
 
 env:
-  PHP_VERSION: "8.6.0beta1"
+  PHP_VERSION: "8.6.0"
   IMAGEMAGICK_VERSION: "7.1.1-47"
 
 jobs:
@@ -102,8 +102,11 @@ jobs:
       # included since php.net QA downloads have been flaky.
       # --------------------------------------------------------
 
-      - name: Download PHP 8.6 TS binary + devel pack + ImageMagick deps
+      - name: Download PHP 8.6 TS binary + devel pack from own releases
         shell: pwsh
+        env:
+          IMAGEMAGICK_VERSION: "7.1.1-47"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -119,15 +122,13 @@ jobs:
                       $size = (Get-Item $OutFile).Length
                       if ($size -lt 10000) { throw "Downloaded file is suspiciously small ($size bytes) - likely an error page, not a real archive." }
 
-                      # Confirm it is actually a valid zip before trusting it.
                       Add-Type -AssemblyName System.IO.Compression.FileSystem
                       $zip = [System.IO.Compression.ZipFile]::OpenRead($OutFile)
                       $zip.Dispose()
 
                       Write-Host "OK ($size bytes)."
                       return
-                  }
-                  catch {
+                  } catch {
                       Write-Host "Attempt $i failed: $($_.Exception.Message)"
                       if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
                       if ($i -lt $Retries) { Start-Sleep -Seconds (5 * $i) }
@@ -136,8 +137,28 @@ jobs:
               throw "Failed to download a valid archive from $Url after $Retries attempts."
           }
 
-          Get-FileWithRetry -Url "https://downloads.php.net/~windows/qa/php-$env:PHP_VERSION-Win32-vs18-x64.zip" -OutFile "php-ts.zip"
-          Get-FileWithRetry -Url "https://downloads.php.net/~windows/qa/php-devel-pack-$env:PHP_VERSION-Win32-vs18-x64.zip" -OutFile "php-devel.zip"
+          # Find latest release from our own repo
+          $headers = @{ "Authorization" = "Bearer $env:GH_TOKEN"; "Accept" = "application/vnd.github+json"; "X-GitHub-Api-Version" = "2022-11-28" }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/markusfoo/php86-windows-builds/releases?per_page=5" -Headers $headers
+          $release = $releases | Where-Object { $_.assets.Count -gt 0 -and $_.prerelease } | Select-Object -First 1
+          if (-not $release) { throw "No prerelease found in markusfoo/php86-windows-builds" }
+
+          Write-Host "Using release: $($release.tag_name) ($($release.assets.Count) assets)"
+
+          # Find the right assets
+          $phpBin = $release.assets | Where-Object { $_.name -match '^php-.*-ts-Win32-vs18-x64\.zip$' -and $_.name -notmatch 'AVX2' -and $_.name -notmatch 'devel' } | Select-Object -First 1
+          $develPack = $release.assets | Where-Object { $_.name -match 'devel' } | Select-Object -First 1
+
+          if (-not $phpBin) { throw "PHP TS x64 binary not found in release $($release.tag_name). Available: $($release.assets | ForEach-Object { $_.name })" }
+          if (-not $develPack) { throw "Devel pack not found in release $($release.tag_name). Available: $($release.assets | ForEach-Object { $_.name })" }
+
+          Write-Host "PHP binary: $($phpBin.name) ($([math]::Round($phpBin.size/1MB, 1)) MB)"
+          Write-Host "Devel pack: $($develPack.name) ($([math]::Round($develPack.size/1MB, 1)) MB)"
+
+          Get-FileWithRetry -Url $phpBin.browser_download_url -OutFile "php-ts.zip"
+          Get-FileWithRetry -Url $develPack.browser_download_url -OutFile "php-devel.zip"
+
+          # ImageMagick deps from php.net PECL (unchanged)
           Get-FileWithRetry -Url "https://downloads.php.net/~windows/pecl/deps/ImageMagick-$env:IMAGEMAGICK_VERSION-vs17-x64.zip" -OutFile "imagemagick.zip"
 
       # --------------------------------------------------------
@@ -558,6 +579,9 @@ jobs:
 
       - name: Download PHP 8.6 NTS binary + devel pack + ImageMagick deps
         shell: pwsh
+        env:
+          PHP_VERSION: "8.6.0beta2"
+          IMAGEMAGICK_VERSION: "7.1.1-47"
         run: |
           $ErrorActionPreference = "Stop"
 
