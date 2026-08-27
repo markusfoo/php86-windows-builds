@@ -19,7 +19,7 @@ name: Build Imagick PHP 8.6 VS18 x64 (from own releases)
 #   nmake "succeeds" because it has nothing to build. No compiler error is
 #   ever produced -- that's why php_imagick.dll was always silently missing.
 #
-#   Fix: ImageMagick's headers now go directly under C:\ImageMagick\ (so
+#   Fix: ImageMagick's headers now go directly under C:\ImageMagick (so
 #   C:\ImageMagick\MagickWand\MagickWand.h exists) and libs go directly under
 #   C:\ImageMagick\lib\ (so C:\ImageMagick\lib\CORE_RL_MagickWand_.lib
 #   exists). --with-imagick="C:\ImageMagick" then matches location #2 above.
@@ -97,9 +97,8 @@ jobs:
           Write-Host "Found: $f"
 
       # --------------------------------------------------------
-      # Downloads (PHP SDK from GitHub + PHP QA binary/devel pack +
-      # ImageMagick deps from php.net). Retries + integrity checks
-      # included since php.net QA downloads have been flaky.
+      # Downloads (PHP SDK from GitHub + PHP binary/devel pack from
+      # own releases + ImageMagick deps from php.net).
       # --------------------------------------------------------
 
       - name: Download PHP 8.6 TS binary + devel pack from own releases
@@ -162,8 +161,7 @@ jobs:
           Get-FileWithRetry -Url "https://downloads.php.net/~windows/pecl/deps/ImageMagick-$env:IMAGEMAGICK_VERSION-vs17-x64.zip" -OutFile "imagemagick.zip"
 
       # --------------------------------------------------------
-      # Download + extract PHP SDK from GitHub (reliable domain,
-      # never failed in any prior run -- no need to vendor it)
+      # Download + extract PHP SDK from GitHub
       # --------------------------------------------------------
 
       - name: Download and extract PHP SDK
@@ -253,6 +251,7 @@ jobs:
           if (Test-Path "C:\php-bin")   { Remove-Item "C:\php-bin" -Recurse -Force }
           if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
 
+          # --- PHP binary ---
           New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
           Expand-Archive -Path "php-ts.zip" -DestinationPath "C:\php-bin" -Force
 
@@ -273,17 +272,18 @@ jobs:
           if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP TS binary." }
           & $php -v
 
+          # --- Devel pack ---
+          # Our devel pack zips also wrap contents in a subdirectory.
+          # Find phpize.bat recursively, then move its CONTAINING directory to C:\php-devel.
           New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
           Expand-Archive -Path "php-devel.zip" -DestinationPath "C:\php-devel-extract" -Force
 
-          # Search for phpize.bat recursively, then move its CONTAINING directory
           $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
           if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP devel pack." }
 
           $develDir = $phpize.Directory.FullName
           Write-Host "Found phpize.bat in: $develDir"
 
-          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
           Move-Item -Path $develDir -Destination "C:\php-devel" -Force
 
           # Verify critical files at expected paths
@@ -301,6 +301,7 @@ jobs:
           }
           Write-Host "PHP devel pack root: C:\php-devel"
           Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
+
       # --------------------------------------------------------
       # Prepare ImageMagick dev tree - THE ACTUAL FIX IS HERE
       # --------------------------------------------------------
@@ -343,14 +344,11 @@ jobs:
           Copy-Item -Path "$includeRoot\*" -Destination $final -Recurse -Force
 
           # THE FIX: libs go directly under C:\ImageMagick\lib (flat).
-          # config.w32's CHECK_LIB automatically also probes a "lib"
-          # subfolder of whatever path you pass to --with-imagick.
           Get-ChildItem -Path $raw -Recurse -Filter "*.lib" | ForEach-Object {
               Copy-Item -Path $_.FullName -Destination "$final\lib" -Force
           }
 
-          # Runtime DLLs, needed later for php.exe -d extension=... testing
-          # and for the final artifact. Irrelevant to configure/nmake.
+          # Runtime DLLs
           Get-ChildItem -Path $raw -Recurse -Filter "*.dll" | ForEach-Object {
               Copy-Item -Path $_.FullName -Destination "$final\bin" -Force
           }
@@ -418,9 +416,6 @@ jobs:
           echo ========================================
           echo CONFIGURE
           echo ========================================
-          REM Do NOT append "=shared" (phpize forces shared automatically).
-          REM Do NOT pass "--with-imagick-dir" (not a real option, silently
-          REM ignored, and gives you a false sense that the path was used).
           call configure.bat --with-php-build="%PHP_DEV%" --with-imagick="%IMAGEMAGICK%" ${{ matrix.avx == 'avx2' && '--enable-native-intrinsics=avx2' || '' }} > configure-output.log 2>&1
           set "CONFIGURE_EXIT=%ERRORLEVEL%"
           type configure-output.log
@@ -438,15 +433,6 @@ jobs:
           echo ========================================
           echo VERIFY IMAGICK WAS ACTUALLY ENABLED
           echo ========================================
-          REM config.w32 prints "Enabling extension <module-dir> [shared]"
-          REM where <module-dir> is the CURRENT DIRECTORY PATH (e.g.
-          REM "C:\imagick-ts"), not the literal word "imagick" -- so we
-          REM can't match on that literal string. The "Enabled extensions"
-          REM summary table it prints right after DOES use the real
-          REM extension name though, e.g. "| imagick   | shared |". Check
-          REM for a line containing both "imagick" and "shared" (the
-          REM WARNING/failure message contains "imagick" but never
-          REM "shared", so this correctly tells success from failure).
           findstr /C:"imagick" configure-output.log | findstr /C:"shared" >nul
           if errorlevel 1 (
               echo.
@@ -481,12 +467,6 @@ jobs:
           echo ========================================
           echo SEARCHING GENERATED DLL
           echo ========================================
-          REM NOTE: "for /r DIR in (literal_name.dll) do" is a classic
-          REM cmd.exe trap -- without a wildcard it does NOT check the
-          REM file actually exists; it just fires on the FIRST directory
-          REM visited (the root itself) with a fabricated, non-existent
-          REM path, so the real nested build output is never reached.
-          REM "dir /s /b" performs a real filesystem search instead.
           set "FOUND_DLL="
           for /f "delims=" %%F in ('dir /s /b /a-d "%SOURCE%\php_imagick.dll" 2^>nul') do (
               set "FOUND_DLL=%%F"
@@ -496,7 +476,6 @@ jobs:
 
           if not defined FOUND_DLL (
               echo ERROR: php_imagick.dll was not produced despite imagick being enabled.
-              echo DLL / OBJ / LIB found under source tree:
               dir /s /b *.dll *.obj *.lib 2>nul
               exit /b 1
           )
@@ -630,8 +609,7 @@ jobs:
 
                       Write-Host "OK ($size bytes)."
                       return
-                  }
-                  catch {
+                  } catch {
                       Write-Host "Attempt $i failed: $($_.Exception.Message)"
                       if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
                       if ($i -lt $Retries) { Start-Sleep -Seconds (5 * $i) }
@@ -654,62 +632,46 @@ jobs:
                   Write-Host "[$i/5] Downloading PHP SDK from GitHub..."
                   Invoke-WebRequest -Uri "https://github.com/php/php-sdk-binary-tools/archive/refs/heads/master.zip" -OutFile "sdk.zip" -UseBasicParsing
                   break
-      - name: Extract PHP NNTS binary + devel pack
+              } catch {
+                  Write-Host "Attempt $i failed: $($_.Exception.Message)"
+                  if ($i -eq 5) { throw "Failed to download PHP SDK from GitHub after 5 attempts." }
+                  Start-Sleep -Seconds (5 * $i)
+              }
+          }
+
+          if (Test-Path "C:\php-sdk") { Remove-Item "C:\php-sdk" -Recurse -Force }
+          New-Item -ItemType Directory -Path "C:\php-sdk-extract" -Force | Out-Null
+          Expand-Archive -Path "sdk.zip" -DestinationPath "C:\php-sdk-extract" -Force
+
+          $root = Get-ChildItem -Path "C:\php-sdk-extract" -Directory | Select-Object -First 1
+          if (-not $root) { throw "PHP SDK archive root was not found." }
+          Move-Item -Path $root.FullName -Destination "C:\php-sdk" -Force
+
+          $starter = Get-ChildItem -Path "C:\php-sdk" -Recurse -Filter "phpsdk-vs18-x64.bat" | Select-Object -First 1
+          if (-not $starter) { throw "phpsdk-vs18-x64.bat not found in downloaded SDK." }
+
+          $bison = Get-ChildItem -Path "C:\php-sdk" -Recurse -Filter "bison.exe" | Select-Object -First 1
+          if (-not $bison) { throw "bison.exe not found in downloaded SDK." }
+
+          Write-Host "SDK starter: $($starter.FullName)"
+          Write-Host "bison.exe:   $($bison.FullName)"
+
+      - name: Extract imagick source (vendored, pre-patched) - NTS copy
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          if (Test-Path "C:\php-bin")   { Remove-Item "C:\php-bin" -Recurse -Force }
-          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
+          if (Test-Path "C:\imagick-nts") { Remove-Item "C:\imagick-nts" -Recurse -Force }
+          New-Item -ItemType Directory -Path "C:\imagick-nts-raw" -Force | Out-Null
 
-          New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
-          Expand-Archive -Path "php-nts.zip" -DestinationPath "C:\php-bin" -Force
+          Expand-Archive -Path "vendor\imagick-php86-patched.zip" -DestinationPath "C:\imagick-nts-raw" -Force
 
-          # Our release zips wrap contents in a subdirectory.
-          # If php.exe is not directly in C:\php-bin, flatten the structure.
-          $php = "C:\php-bin\php.exe"
-          if (-not (Test-Path $php)) {
-              $found = Get-ChildItem -Path "C:\php-bin" -Recurse -Filter "php.exe" | Select-Object -First 1
-              if (-not $found) { throw "php.exe not found anywhere in the extracted PHP NNTS binary." }
-              $innerDir = $found.Directory.FullName
-              Write-Host "Flattening: php.exe is in $innerDir, moving contents to C:\php-bin"
-              Get-ChildItem -Path $innerDir | Move-Item -Destination "C:\php-bin" -Force
-              if ((Get-ChildItem -Path $innerDir -ErrorAction SilentlyContinue).Count -eq 0) {
-                  Remove-Item $innerDir -Force
-              }
-          }
-          $php = "C:\php-bin\php.exe"
-          if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP NNTS binary." }
-          & $php -v
+          $configw32 = Get-ChildItem -Path "C:\imagick-nts-raw" -Recurse -Filter "config.w32" | Select-Object -First 1
+          if (-not $configw32) { throw "config.w32 not found inside vendored imagick source zip." }
 
-          New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
-          Expand-Archive -Path "php-devel-nts.zip" -DestinationPath "C:\php-devel-extract" -Force
+          Move-Item -Path $configw32.Directory.FullName -Destination "C:\imagick-nts" -Force
 
-          # Search for phpize.bat recursively, then move its CONTAINING directory
-          $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
-          if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP devel pack." }
-
-          $develDir = $phpize.Directory.FullName
-          Write-Host "Found phpize.bat in: $develDir"
-
-          if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
-          Move-Item -Path $develDir -Destination "C:\php-devel" -Force
-
-          # Verify critical files at expected paths
-          if (-not (Test-Path "C:\php-devel\phpize.bat")) { throw "phpize.bat not at C:\php-devel\phpize.bat" }
-          if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
-              Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
-              $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.FullName -match '\\main\\' } | Select-Object -First 1
-              if (-not $h) { throw "php.h not found in the devel pack at all." }
-              Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
-              $innerInclude = $h.Directory.Parent.FullName
-              if (-not (Test-Path "C:\php-devel\include")) {
-                  Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
-              }
-          }
-          Write-Host "PHP devel pack root: C:\php-devel"
-          Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
+          Write-Host "imagick source root: C:\imagick-nts"
 
       - name: Verify PHP 8.6 compatibility patch is present
         shell: pwsh
@@ -738,25 +700,44 @@ jobs:
           if (Test-Path "C:\php-bin")   { Remove-Item "C:\php-bin" -Recurse -Force }
           if (Test-Path "C:\php-devel") { Remove-Item "C:\php-devel" -Recurse -Force }
 
+          # --- PHP binary (QA zips are flat - php.exe at root) ---
           New-Item -ItemType Directory -Path "C:\php-bin" -Force | Out-Null
           Expand-Archive -Path "php-nts.zip" -DestinationPath "C:\php-bin" -Force
 
           $php = "C:\php-bin\php.exe"
+          if (-not (Test-Path $php)) {
+              # Safety: if QA format changed and now wraps in subdirectory, flatten it
+              $found = Get-ChildItem -Path "C:\php-bin" -Recurse -Filter "php.exe" | Select-Object -First 1
+              if (-not $found) { throw "php.exe not found anywhere in the extracted PHP NTS binary." }
+              $innerDir = $found.Directory.FullName
+              Write-Host "Flattening: php.exe is in $innerDir, moving contents to C:\php-bin"
+              Get-ChildItem -Path $innerDir | Move-Item -Destination "C:\php-bin" -Force
+              if ((Get-ChildItem -Path $innerDir -ErrorAction SilentlyContinue).Count -eq 0) {
+                  Remove-Item $innerDir -Force
+              }
+          }
+          $php = "C:\php-bin\php.exe"
           if (-not (Test-Path $php)) { throw "php.exe not found after extracting PHP NTS binary." }
           & $php -v
 
+          # --- Devel pack (QA devel packs have a subdirectory wrapper) ---
           New-Item -ItemType Directory -Path "C:\php-devel-extract" -Force | Out-Null
           Expand-Archive -Path "php-devel-nts.zip" -DestinationPath "C:\php-devel-extract" -Force
 
           $phpize = Get-ChildItem -Path "C:\php-devel-extract" -Recurse -Filter "phpize.bat" | Select-Object -First 1
           if (-not $phpize) { throw "phpize.bat not found in the downloaded PHP NTS devel pack." }
 
-          Move-Item -Path $phpize.Directory.FullName -Destination "C:\php-devel" -Force
+          $develDir = $phpize.Directory.FullName
+          Write-Host "Found phpize.bat in: $develDir"
 
+          Move-Item -Path $develDir -Destination "C:\php-devel" -Force
+
+          # Verify critical files at expected paths
+          if (-not (Test-Path "C:\php-devel\phpize.bat")) { throw "phpize.bat not at C:\php-devel\phpize.bat" }
           if (-not (Test-Path "C:\php-devel\include\main\php.h")) {
               Write-Host "WARNING: C:\php-devel\include\main\php.h not found directly, checking subdirectories..."
               $h = Get-ChildItem -Path "C:\php-devel" -Recurse -Filter "php.h" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.FullName -match '\main\' } | Select-Object -First 1
+                    Where-Object { $_.FullName -match '\\main\\' } | Select-Object -First 1
               if (-not $h) { throw "php.h not found in the devel pack at all." }
               Write-Host "Found php.h at $($h.FullName), flattening include/ directory"
               $innerInclude = $h.Directory.Parent.FullName
@@ -764,6 +745,8 @@ jobs:
                   Move-Item -Path $innerInclude -Destination "C:\php-devel\include" -Force
               }
           }
+          Write-Host "PHP devel pack root: C:\php-devel"
+          Write-Host "PHP core headers confirmed at C:\php-devel\include\main\php.h"
 
       - name: Prepare ImageMagick development files (fixed layout)
         shell: pwsh
@@ -788,11 +771,13 @@ jobs:
               Select-Object -First 1
 
           if (-not $header) {
+              Write-Host "ImageMagick archive structure:"
               Get-ChildItem -Path $raw -Recurse -File | Select-Object -First 200 | ForEach-Object { Write-Host $_.FullName }
               throw "MagickWand.h was not found anywhere in the ImageMagick archive."
           }
 
           $includeRoot = $header.Directory.Parent.FullName
+          Write-Host "ImageMagick include root in archive: $includeRoot"
 
           Copy-Item -Path "$includeRoot\*" -Destination $final -Recurse -Force
 
@@ -855,7 +840,10 @@ jobs:
           type configure-output.log
 
           if not "%CONFIGURE_EXIT%"=="0" (
+              echo.
+              echo ========================================
               echo CONFIGURE FAILED
+              echo ========================================
               if exist config.log type config.log
               exit /b 1
           )
@@ -864,13 +852,9 @@ jobs:
           echo ========================================
           echo VERIFY IMAGICK WAS ACTUALLY ENABLED
           echo ========================================
-          REM config.w32 prints "Enabling extension <module-dir> [shared]"
-          REM where <module-dir> is the current directory path, not the
-          REM literal word "imagick" -- match on the "Enabled extensions"
-          REM summary table instead (a line containing both "imagick" and
-          REM "shared"; the failure/WARNING message never contains "shared").
           findstr /C:"imagick" configure-output.log | findstr /C:"shared" >nul
           if errorlevel 1 (
+              echo.
               echo ERROR: config.w32 did NOT enable imagick.
               echo Expected:
               echo   %IMAGEMAGICK%\MagickWand\MagickWand.h
@@ -891,6 +875,7 @@ jobs:
           type nmake-nts.log
 
           if not "%NMAKE_EXIT%"=="0" (
+              echo.
               echo NMAKE FAILED
               exit /b %NMAKE_EXIT%
           )
@@ -899,12 +884,6 @@ jobs:
           echo ========================================
           echo SEARCHING GENERATED DLL
           echo ========================================
-          REM NOTE: "for /r DIR in (literal_name.dll) do" is a classic
-          REM cmd.exe trap -- without a wildcard it does NOT check the
-          REM file actually exists; it just fires on the FIRST directory
-          REM visited (the root itself) with a fabricated, non-existent
-          REM path, so the real nested build output is never reached.
-          REM "dir /s /b" performs a real filesystem search instead.
           set "FOUND_DLL="
           for /f "delims=" %%F in ('dir /s /b /a-d "%SOURCE%\php_imagick.dll" 2^>nul') do (
               set "FOUND_DLL=%%F"
@@ -989,7 +968,7 @@ jobs:
 
 
   # ============================================================
-  # RELEASE JOB - automatically publish built artifacts as a GitHub Release
+  # RELEASE JOB
   # ============================================================
   release:
     needs: [build-ts, build-nts]
@@ -1034,7 +1013,7 @@ jobs:
             | **Build date** | ${{ steps.meta.outputs.build_date }} ${{ steps.meta.outputs.build_time }} |
             | **Compiler** | Visual Studio 2024 (VC18, vs18) |
             | **Runner** | windows-2025 |
-            | **PHP version** | 8.6.0beta1 |
+            | **PHP version** | 8.6.0beta2 |
             | **ImageMagick** | 7.1.1-47 |
             | **Variants** | TS + NTS + AVX2 |
 
@@ -1063,7 +1042,7 @@ jobs:
 
             ## Requirements
 
-            - PHP 8.6.0beta1 or newer (matching the variant: TS or NTS)
+            - PHP 8.6.0beta2 or newer (matching the variant: TS or NTS)
             - For AVX2 builds: Intel Haswell (2013+) or AMD Ryzen (2017+) CPU
             - Windows x64 (10/11, Server 2016+)
 
